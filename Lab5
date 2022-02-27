@@ -1,0 +1,243 @@
+; Archivo:	lab5.s
+; Dispositivo:	PIC16F887
+; Autor:	Irenne Cruz
+; Compilador:	pic-as (v2. 30), MPLABX V5. 40
+;    
+; Porgrama: Contador de 16 bits
+; Hardware: LEDs en puerto A y pushbuttons en el puerto B y displays en puerto C
+    
+; Creado: 23 feb, 2022
+; Última modificación: 23 feb, 2022
+    
+PROCESSOR 16F887
+#include <xc.inc>
+
+;configuracion de word 1
+ CONFIG FOSC = INTRC_NOCLKOUT	; oscilador interno sin salidas
+ CONFIG WDTE = OFF		; reinicio repititivo del pic apagado    
+ CONFIG PWRTE = ON		; espera de 72ms al inciar habilitada
+ CONFIG MCLRE = OFF		; pin MCLRE se usa como In/Out
+ CONFIG CP = OFF		; sin protección de código
+ CONFIG CPD = OFF		; sin protección de datos
+
+ CONFIG BOREN = OFF		; sin reinicio cuando el voltaje de alimentacion baja de 4V
+ CONFIG IESO = OFF		; reinicio sin cambio de reloj de interno a externo
+ CONFIG FCMEN = OFF		; cambio de reloj externo a interno si hay fallo
+ CONFIG LVP = ON		; programacion en bajo voltaje permitida
+
+; configuracion word 2
+ CONFIG WRT = OFF		; potección autoescritura por el programa apagada
+ CONFIG BOR4V = BOR40V		; reinicio abajo de 4V, (BOR21V=2.1v)
+
+ BMODO EQU 0
+ BACCION EQU 1
+ 
+; macros
+ RESET_TMR0 MACRO TMR_VAR
+     banksel TMR0	    ; cambiamos de banco
+     movlw   TMR_VAR
+     movlw   TMR0	    ; configuramos tiempo de retardo
+     bcf     T0IF	    ; limpiamos bandera de interrupción
+     endm
+ 
+ ; variables
+ PSECT udata_shr		    ; Memoria compartida
+     W_TEMP:		DS 1
+     STATUS_TEMP:	DS 1
+    
+ PSECT udata_bank0
+     valor:		DS 1	; Contiene valor a mostrar en los displays de 7-seg
+     banderas:		DS 1	; Indica que display hay que encender
+     nibbles:		DS 2	; Contiene los nibbles alto y bajo de valor
+     display:		DS 2	; Representación de cada nibble en el display de 7-seg
+    
+ PSECT resVect, class=CODE, abs, delta=2
+;------------vector reset--------------
+ ORG 00h			
+ resetVec:
+     pagesel main		; Cambio de pagina
+     goto    main
+    
+     
+ PSECT intVect, class=CODE, abs, delta=2 
+;-------vector interrupciones----------
+ ORG 04h			 
+     
+ push_buttons:
+     movwf  W_TEMP		; Guardamos W
+     swapf  STATUS, W
+     movwf  STATUS_TEMP		; Guardamos STATUS
+    
+ ISR:
+    
+     btfsc  T0IF		
+     call   int_timer0		
+     btfsc  RBIF		
+     call   int_portB		
+    
+ POP:
+     swapf   STATUS_TEMP, W  
+     movwf   STATUS		
+     swapf   W_TEMP, F	    
+     swapf   W_TEMP, W		
+     retfie			; Regresamos a ciclo principal
+    
+    
+PSECT code, delta=2, abs
+ORG 100h			
+;------------- CONFIGURACION ------------
+ main:
+     call    config_io		
+     call    config_reloj	
+     call    config_timer0	
+     call    config_int		
+     banksel PORTD		
+    
+ loop:
+     movf    PORTA, W		; Valor del PORTA a W
+     movwf   valor		; 
+     call    obtener_nibble	; Guardamos nibble alto y bajo de valor
+     call    set_display	; Guardamos los valores a enviar en PORTC para mostrar valor en hex
+     goto    loop	    
+    
+;------------- SUBRUTINAS ---------------
+ config_reloj:
+     banksel	    OSCCON		; cambiamos a banco 1
+     bsf	    OSCCON, 0		
+     bsf	    OSCCON, 6
+     bsf	    OSCCON, 5
+     bcf	    OSCCON, 4		
+     return
+    
+; Configuramos el TMR0 para obtener un retardo de 50ms
+ config_timer0:
+     banksel OPTION_REG		; cambiamos de banco
+     bcf	    T0CS	; TMR0 como temporizador
+     bcf	    PSA		; prescaler a TMR0
+     bsf	    PS2
+     bsf	    PS1
+     bsf	    PS0		
+     RESET_TMR0 61		; Reiniciamos TMR0 para 50ms
+     return 
+    
+ config_io:
+     banksel	    ANSEL
+     clrf	    ANSEL
+     clrf	    ANSELH		
+     banksel	    TRISC
+     clrf	    TRISC		; PORTC como salida
+     bcf	    TRISD, 0		; RD0 como salida / display nibble alto
+     bcf	    TRISD, 1		; RD1 como salida / display nibble bajo
+     bcf	    TRISD, 2		; RD2 como salida / indicador de estado
+     bsf	    TRISB, BMODO	; RB0 como entrada / Botón modo
+     bsf	    TRISB, BACCION	; RB1 como entrada / Botón acción
+     clrf	    TRISA		; RBA como salida
+     banksel	    PORTC
+     clrf	    PORTC		; Apagamos PORTC
+     bcf	    PORTD, 0		; Apagamos RD0
+     bcf	    PORTD, 1		; Apagamos RD1
+     bcf	    PORTD, 2		; Apagamos RD2
+    
+     clrf	    PORTA		; Apagamos PORTA
+     clrf	    banderas		; Limpiamos GPR
+     return
+    
+config_int:
+     banksel	    IOCB		
+     bsf	    IOCB0		
+     bsf	    IOCB1		
+     banksel	    INTCON
+     bsf	    GIE			; Habilitamos interrupciones
+     bsf	    T0IE		; Habilitamos interrupcion TMR0
+     bcf	    T0IF		
+     bcf	    RBIF		
+     return
+    
+ obtener_nibble:
+     movlw   0x0F		
+     andwf   valor, W		
+     movwf   nibbles		
+     movlw   0xF0		
+     andwf   valor, W		
+     movwf   nibbles+1		
+     swapf   nibbles+1, F	     	
+     return
+    
+ set_display:
+     movf    nibbles, W		
+     call    tabla		
+     movwf   display		
+    
+     movf    nibbles+1, W	
+     call    tabla		
+     movwf   display+1		
+     return
+    
+ mostrar_valor:
+     bcf	    PORTD, 0		; Apagamos display de nibble alto
+     bcf	    PORTD, 1		; Apagamos display de nibble bajo
+     btfsc   banderas, 0		
+     goto    display_1		
+    
+     display_0:			
+	 movf   display, W	
+	 movwf  PORTC		
+	 bsf	PORTD, 1	
+	 bsf	banderas, 0	
+     return
+
+     display_1:
+	 movf    display+1, W	
+	 movwf   PORTC		
+	 bsf	 PORTD, 0	
+	 bcf	 banderas, 0	
+     return
+    
+int_timer0:
+     RESET_TMR0 61		
+     call    mostrar_valor	
+     return
+    
+int_portB:
+     btfsc   PORTD, 2		
+     goto    estado_1
+    
+     estado_0:
+	 btfss   PORTB, BMODO	
+	 bsf	 PORTD, 2	
+	 btfss   PORTB, BACCION	
+	 incf    PORTA		; Incrementar PORTA
+	 bcf	 RBIF		
+     return
+
+
+     estado_1:
+	 btfss   PORTB, BMODO	
+	 bcf	 PORTD, 2	
+	 btfss   PORTB, BACCION	
+	 decf    PORTA		; Decrementar PORTA
+	 bcf	 RBIF		
+     return
+    
+ ORG 200h
+ tabla:
+     clrf PCLATH    ; clear al pclath
+     bsf PCLATH, 1  ; pclath = 01
+     andlw 0x0f
+     addwf PCL	    ; PC = PCLATH + PCL
+     retlw 00111111B ; 0 
+     retlw 00000110B ; 1
+     retlw 01011011B ; 2
+     retlw 01001111B ; 3
+     retlw 01100110B ; 4
+     retlw 01101101B ; 5
+     retlw 01111101B ; 6
+     retlw 00000111B ; 7
+     retlw 01111111B ; 8
+     retlw 01101111B ; 9
+     retlw 01110111B ; A
+     retlw 01111100B ; B
+     retlw 00111001B ; C
+     retlw 01011110B ; D
+     retlw 01111001B ; E
+     retlw 01110001B ; F
