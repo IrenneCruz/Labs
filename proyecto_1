@@ -1,0 +1,819 @@
+; Archivo:	proyecto1.s
+; Dispositivo:	PIC16F887
+; Autor:	Irenne Cruz
+; Compilador:	pic-as (v2. 30), MPLABX V5. 40
+;    
+; Porgrama: Reloj digital - Proyecto 1
+; Hardware: Displays en puertos C y multiplexado en D, Pushbuttons en puerto B, LED en puerto A y E
+    
+; Creado: 14 mar, 2022
+; Última modificación: 23 mar, 2022 
+    
+ PROCESSOR 16F887
+ #include <xc.inc>
+ 
+; configuracion de word 1
+ CONFIG FOSC = INTRC_NOCLKOUT	; oscilador interno sin salidas
+ CONFIG WDTE = OFF  ; reinicio repititivo del pic apagado    
+ CONFIG PWRTE = OFF ; no espera de 72ms al inciar habilitada
+ CONFIG MCLRE = OFF ; pin MCLRE se usa como In/Out
+ CONFIG CP = OFF    ; sin protección de código
+ CONFIG CPD = OFF   ; sin protección de datos
+
+ CONFIG BOREN = OFF ; sin reinicio cuando el voltaje de alimentacion baja de 4V
+ CONFIG IESO = OFF  ; reinicio sin cambio de reloj de interno a externo
+ CONFIG FCMEN = OFF ; cambio de reloj externo a interno si hay fallo
+ CONFIG LVP = OFF   ; programacion en bajo voltaje no permitida
+ 
+; configuracion word 2
+ CONFIG WRT = OFF	; poteccion autoescritura por el programa apagada
+ CONFIG BOR4V = BOR40V	; reinicio abajo de 4V, (BOR21V=2.1v)
+
+;------macros------- 
+ restart_tmr0   macro
+    banksel PORTA
+    movlw   196
+    movwf   TMR0
+    bcf	    T0IF
+ endm
+ 
+ restart_tmr1   macro
+    banksel PORTA
+    movlw   00001011B
+    movwf   TMR1H
+    movlw   11011100B
+    movwf   TMR1L
+    bcf	    TMR1IF
+ endm
+ 
+ restart_tmr2   macro
+    banksel TRISB
+    movwf 244
+    movwf PR2
+    clrf TMR2
+    bcf TMR2IF
+ endm 
+ 
+ div	macro	divisor,cociente,residuo
+	movwf	conteo
+	clrf	conteo+1
+	
+	incf	conteo+1
+	movlw	divisor
+	subwf	conteo,f
+	btfsc	STATUS,0
+	goto	$-4
+	
+	decf	conteo+1,w
+	movwf	cociente
+	
+	movlw	divisor
+	addwf	conteo,w
+	movwf	residuo
+  endm
+      
+;---------------variables--------------  
+ PSECT udata_bank0 ; common memory    
+     estado: DS 1  
+    
+     var1: DS 1
+     var2: DS 1
+    
+     var_min:  DS 1
+     var_hora: DS 1
+     var_dia:  DS 1
+     var_mes:  DS 1
+    
+     disp_most:	       DS 1
+     led_intermitente: DS 1
+     segundos:	       DS 1
+     minutos:	       DS 1
+     horas:	       DS 1
+     dias:	       DS 1
+     meses:	       DS 1
+    
+     unidades:	    DS 1
+     decenas:	    DS 1
+  
+     display_1:	    DS 1
+     display_2:	    DS 1
+     display_3:	    DS 1
+     display_4:	    DS 1
+    
+     contador:      DS 2
+     conteo:	    DS 1
+     guardar:	    DS 1
+     limite_mes:    DS 1
+
+    
+ PSECT udata_shr ; common memory
+     W_TEMP:	    DS 1 ; 1 byte
+     STATUS_TEMP:   DS 1 ; 1 byte
+    
+  
+;------------vector reset------------     
+ PSECT resVect, class = CODE, abs, delta=2    
+ ORG 00h ; posición 0000h para el reset
+     resetVec:
+	 PAGESEL main
+	 goto    main    
+     
+     
+;-----------vector de interrupción-----------    
+ PSECT intVect, class=CODE, abs, delta=2
+ ORG 04h ; posición 0004h para interrupciones
+ 
+    push:
+	movwf W_TEMP
+	swapf STATUS, W
+	movwf STATUS_TEMP
+
+    isr:
+	btfsc T0IF
+	call  int_t0
+	btfsc TMR1IF
+	call  int_t1
+	btfsc TMR2IF
+	call  int_t2
+
+	btfsc RBIF
+	call  inter_ioc  
+
+    pop:
+	swapf STATUS_TEMP, W
+	movwf STATUS
+	swapf W_TEMP, F
+	swapf W_TEMP, W
+	retfie
+
+    int_t0:
+	incf	disp_most
+	btfsc	disp_most,2
+	clrf	disp_most
+	
+	btfss	disp_most,1
+	goto	disp_1_o_2
+	goto	disp_3_o_4
+	restart_tmr0
+    return
+    
+    disp_1_o_2:
+	restart_tmr0
+	btfss	disp_most,0
+	goto	mostrar_disp1
+	goto	mostrar_disp2
+    return
+    
+    disp_3_o_4:
+	restart_tmr0
+	btfss	disp_most,0
+	goto	mostrar_disp3
+	goto	mostrar_disp4
+    return
+    
+    mostrar_disp1:
+	movf	display_1,w
+	movwf	PORTC
+	movlw	0001B
+	movwf	PORTD
+    return
+    
+    mostrar_disp2:
+	movlw	0010B
+	movwf	PORTD
+	movf	display_2,w
+	movwf	PORTC
+    return
+    
+    mostrar_disp3:
+	movf	display_3,w
+	movwf	PORTC
+	movlw	0100B
+	movwf	PORTD
+    return
+    
+    mostrar_disp4:
+	movf	display_4,w
+	movwf	PORTC
+	movlw	1000B
+	movwf	PORTD
+    return
+    
+    int_t1:
+	incf segundos
+	restart_tmr1
+    return
+
+    int_t2:
+	bcf TMR2IF
+        incf PORTE
+        btfsc PORTE, 1
+        clrf PORTE
+    return
+
+;-------configuración pushbuttons--------- 
+ 
+    inter_ioc:
+	banksel PORTA
+	btfss   PORTB, 0
+	goto    cambiar_estado
+
+	btfss   PORTB, 1
+	goto    pushbutton1
+
+	btfss   PORTB, 2
+	goto    pushbutton2
+
+	btfss   PORTB, 3
+	goto    pushbutton3
+
+	btfss   PORTB, 4
+	goto    pushbutton4
+	bcf     RBIF
+    return
+
+    cambiar_estado:
+	bcf   RBIF
+	incf  estado
+	btfsc estado, 2
+	clrf  estado
+	movf  estado, W
+	movwf PORTA
+
+	btfsc estado, 1
+	goto  estados_3_y_4
+    return   
+
+    estados_3_y_4:
+	btfss  estado, 0 
+	goto   fecha_y_hora
+    return
+
+    fecha_y_hora:
+	movf   minutos, W
+	movwf  var_min
+	movf   horas, W
+	movwf  var_hora
+	movf   dias, W
+	movwf  var_dia
+	movf   meses, W
+	movwf  var_mes
+    return
+
+;------- decremento en la hora o día con el push button 1 ------- 
+    pushbutton1:
+	bcf   RBIF
+	btfsc estado, 1
+	goto  cambio_hora_dia1
+    return
+
+    cambio_hora_dia1:
+	btfss estado, 0
+	goto  cambio_decremento_var_hora
+	goto  cambio_decremento_var_dia
+    return
+
+    cambio_decremento_var_hora:
+	decf  var_hora
+    return
+
+    cambio_decremento_var_dia:
+	decf  var_dia
+    return
+
+;------- incremento en la hora o día con el push button 2 ------- 
+    pushbutton2:
+	bcf   RBIF
+	btfsc estado, 1
+	goto  cambio_hora_dia2
+    return
+
+    cambio_hora_dia2:
+	btfss  estado, 0
+	goto   cambio_incremento_var_hora
+	goto   cambio_incremento_var_dia
+       return
+
+    cambio_incremento_var_hora:
+	incf  var_hora
+    return
+
+    cambio_incremento_var_dia:
+	incf  var_dia
+    return
+
+;------- decremento en los minutos o meses con el push button 3 ------- 
+ 
+    pushbutton3:
+	bcf   RBIF
+	btfsc estado, 1
+	goto  cambio_min_mes1
+    return
+
+    cambio_min_mes1:
+	btfss estado, 0
+	goto  cambio_decremento_var_min
+	goto  cambio_decremento_var_mes
+    return
+
+    cambio_decremento_var_min:
+	decf  var_min
+    return
+
+    cambio_decremento_var_mes:
+	decf  var_mes
+    return
+ 
+;------- incremento en los minutos o meses con el push button 4 ------- 
+ 
+    pushbutton4:
+	bcf   RBIF
+	btfsc estado, 1
+	goto  cambio_min_mes2
+    return
+
+    cambio_min_mes2:
+	btfss estado, 0
+	goto  cambio_incremento_var_min
+	goto  cambio_incremento_var_mes
+    return
+
+    cambio_incremento_var_min:
+	incf  var_min
+    return
+
+    cambio_incremento_var_mes:
+	incf  var_mes
+    return
+  
+;-----------tablas------------ 
+ 
+ PSECT CODE, delta=2, abs
+    ORG 0xC0
+    cantidad_de_dias_en_cada_mes:
+	clrf   PCLATH 
+	andlw 0x0F
+	addwf PCL ; PC = PCLATH + PCL + w
+	retlw 00000000B ;anti error
+	retlw 32 ;enero
+	retlw 29 ;febrero
+	retlw 32 ;marzo
+	retlw 31 ;abril
+	retlw 32 ;mayo
+	retlw 31 ;junio
+	retlw 32 ;julio
+	retlw 32 ;agosto
+	retlw 31 ;septiembre
+	retlw 32 ;octubre
+	retlw 31 ;noviembre
+	retlw 32 ;diciembre
+	retlw 00000000B  ;anti error  
+
+
+ PSECT code, delta=2, abs
+    ORG 100h
+    tabla:
+	clrf PCLATH
+	bsf  PCLATH, 0 ; PCLATH = 01	PCL = 02
+	andlw 0x0f
+	addwf PCL ; PC = PCLATH + PCL + w
+	retlw 00111111B ;0
+	retlw 00000110B ;1
+	retlw 01011011B ;2
+	retlw 01001111B ;3
+	retlw 01100110B ;4
+	retlw 01101101B ;5
+	retlw 01111101B ;6
+	retlw 00000111B ;7
+	retlw 01111111B ;8
+	retlw 01100111B ;9
+	retlw 00000000B ;anti error  
+
+;------------configuración micro-------------
+    main:
+	call config_io 
+	call config_reloj  
+	call config_intrpt 
+	call config_ioc    
+
+	call config_tmr0
+	call config_tmr1
+	call config_tmr2
+
+	clrf segundos
+	clrf minutos
+	clrf horas
+	clrf var_min
+	clrf var_hora
+
+	movlw 1
+	movwf dias
+	movwf meses
+	movwf var_dia
+	movwf var_mes
+	movwf limite_mes
+
+	clrf estado
+	clrf led_intermitente
+	clrf disp_most
+	clrf var1
+	clrf var2
+	banksel PORTA
+
+
+;---------loop principal----------
+    loop:
+	btfss PORTB, 0
+	call inc_cont
+	call ver_segundos
+	call ver_minutos
+	call ver_horas
+	call ver_dias
+	call ver_meses
+	call ver_var_min
+	call ver_var_hora
+	call ver_var_dia
+	call ver_var_meses
+	call ver_estado
+	call displays_listos
+	goto loop ; loop forever
+
+;----------configuraciones---------
+     
+    config_io: ;subrutina entradas y salidas
+	banksel ANSEL
+	clrf    ANSELH
+	clrf    ANSEL
+
+	banksel TRISA
+	clrf    TRISA
+	clrf    TRISC
+	clrf    TRISD
+	clrf    TRISE
+	bsf     TRISB, 0
+	bsf     TRISB, 1
+	bsf     TRISB, 2
+	bsf     TRISB, 3
+	bsf     TRISB, 4
+	bcf     OPTION_REG, 7
+	bsf     WPUB, 0
+	bsf     WPUB, 1
+	bsf     WPUB, 2
+	bsf     WPUB, 3
+	bsf     WPUB, 4
+
+	banksel PORTA
+	clrf    PORTA
+	clrf    PORTC
+	clrf    PORTD
+	clrf    PORTE
+    return
+
+    config_reloj: ;configuraciÛn del reloj con los registros del OSCCON para definir el oscilador
+	banksel OSCCON
+	bcf IRCF2  ;OSCCON, 6 / bit 2 del IRCF en clear
+	bsf IRCF1  ;OSCCON, 6 / bit 1 del IRCF en set
+	bsf IRCF0  ;OSCCON, 6 / bit 0 del IRCF en set y oscilador de 500kHz configurado (110)
+	bsf SCS	;reloj interno en set
+    return
+
+    config_tmr0:
+	banksel TRISA
+	bcf T0CS
+	bcf PSA  
+	bcf PS2
+	bsf PS1
+	bcf PS0 ; prescaler en 256 (111)
+	restart_tmr0 ;macro de reinicio al tmr0
+    return    
+
+    config_tmr1:
+       banksel PORTA
+	bsf TMR1ON 
+	bcf TMR1CS
+	bcf T1CKPS1
+	bsf T1CKPS0 ;presclaer 11 (1:8)
+	restart_tmr1
+    return    
+
+    config_tmr2:
+	banksel PORTA
+	bsf	TMR2ON
+	bsf	T2CKPS1
+	bsf	TOUTPS3
+	bsf	TOUTPS2
+	bsf	TOUTPS1
+	bsf	TOUTPS0
+	clrf	TMR2
+	
+	BANKSEL TRISA
+	movlw	244
+	movwf	PR2
+	restart_tmr2
+    return
+
+
+    config_intrpt:
+        banksel PORTA
+	bsf GIE ;habilitando las globales de ultimo
+	bsf RBIE
+	bsf T0IE 
+	
+	banksel TRISA
+	bsf TMR1IE ; interrupcion del tmr1
+	bsf TMR2IE ; interrupcion del tmr2
+
+	banksel PORTA
+	bcf RBIF
+	bcf T0IF
+	bcf TMR1IF
+	bcf TMR2IF
+    return
+
+
+    config_ioc:
+	banksel TRISA
+	bsf IOCB,0
+	bsf IOCB,1
+	bsf IOCB,2
+	bsf IOCB,3
+	bsf IOCB,4
+
+	banksel PORTA
+	movf PORTB, W
+	bcf RBIF
+    return
+
+;----------subrutinas---------
+;-----segundos a minutos a horas a dias a meses--------
+    ver_segundos:
+	movlw 60
+	subwf segundos,w
+	btfsc STATUS,2
+	goto  de_seg_a_min
+    return
+
+    de_seg_a_min:
+	clrf segundos
+	incf minutos
+    return
+
+    ver_minutos:
+	movlw 60
+	subwf minutos, W
+	btfsc STATUS,2
+	goto de_min_a_horas
+    return
+
+    de_min_a_horas:
+	clrf minutos
+	incf horas
+    return
+
+    ver_horas:
+	movlw 24
+	subwf dias, W
+	btfsc STATUS,2
+	goto  de_horas_a_dias
+       return
+
+    de_horas_a_dias:
+	clrf horas
+	incf dias
+    return
+
+    ver_dias:
+	movf  meses, W
+	call  cantidad_de_dias_en_cada_mes
+	subwf dias, W
+	btfsc STATUS,2
+	goto  de_dias_a_meses
+    return
+
+    de_dias_a_meses:
+	movlw  1
+	movwf  dias
+	incf   meses
+    return
+
+    ver_meses:
+	movlw  13
+	subwf  meses, W
+	btfsc  STATUS,2
+	goto   ultimos_meses
+    return
+
+    ultimos_meses:
+	movlw  1
+	movwf  meses
+    return
+  
+;-------variaciones de minutos, horas, dias y meses-------- (es decir el aumento y decremento de estos)
+    ver_var_min:
+	btfsc  var_min, 7
+	goto   var_minUp
+	movf   var_min, W
+	sublw  60
+	btfsc  STATUS,2
+	goto   var_minDown
+    return
+
+    var_minDown:
+	clrf  var_min
+	incf  var_hora
+    return
+
+    var_minUp:
+	movlw  59
+	movwf  var_min
+	decf   var_hora
+    return
+
+    ver_var_hora:
+	btfsc  var_hora,7
+	goto   var_horaUp
+	movf   var_hora,w
+	sublw  24
+	btfsc  STATUS,2
+	goto   var_horaDown
+    return
+
+    var_horaDown:
+	clrf  var_hora
+	incf  var_dia
+    return
+
+    var_horaUp:
+	movlw  23
+	movwf  var_hora
+	decf   var_dia
+    return
+
+    ver_var_dia:
+	movf   var_dia, W 
+	sublw  0
+	btfsc  STATUS, 2
+	goto   var_diaUp
+	movf   var_mes, W
+	call   cantidad_de_dias_en_cada_mes
+	subwf  var_dia,w
+	btfsc  STATUS,2
+	goto   var_diaDown
+    return
+
+    var_diaDown:
+	movlw  1
+	movwf  var_dia
+	incf   var_mes
+    return
+
+    var_diaUp:
+	decf  var_mes
+	call  ver_var_meses
+	movf  var_mes,w
+	call  cantidad_de_dias_en_cada_mes
+	movwf var_dia
+	movlw 1B
+	subwf var_dia,F
+    return
+
+    ver_var_meses:
+	movf   var_mes, w
+	sublw  0
+	btfsc  STATUS,2
+	goto   var_mesUp
+	movf   var_mes, w
+	sublw  13
+	btfsc  STATUS,2
+	goto   var_mesDown
+    return
+
+    var_mesDown:
+	movlw  1
+	movwf  var_mes
+    return
+
+    var_mesUp:
+	movlw  12
+	movwf  var_mes
+    return
+
+;------------estados--------------   
+    ver_estado:
+	btfss  estado, 1
+	goto   estado1_o_2
+	goto   estado3_o_4
+    return
+
+    estado1_o_2:
+	btfss	estado, 0
+	goto	estado_1
+	goto	estado_2
+    return
+
+    estado3_o_4:
+	btfss	estado, 0
+	goto	estado_3
+	goto	estado_4
+    return
+
+    estado_1:
+	btfsc	PORTB,0
+	clrf	guardar
+	movf	minutos, W
+	movwf	var1
+	movf	horas, W
+	movwf	var2
+	btfsc	guardar,0
+	goto	guardar_fecha
+    return
+
+    guardar_fecha:
+	bcf	guardar,0
+	movf	var_dia, W
+	movwf	dias
+	movf	var_mes, W
+	movwf	meses
+    return
+
+    estado_2:
+	btfsc	PORTB,0
+	clrf	guardar
+	movf	meses, W
+	movwf	var1
+	movf	dias, W
+	movwf	var2
+    return
+
+    estado_3:
+	btfsc	PORTB,0
+	clrf	guardar
+	movf	var_min, W
+	movwf	var1
+	movf	var_hora, W
+	movwf	var2
+    return
+
+    estado_4:
+	btfsc	PORTB, 0
+	clrf	guardar
+	movf	var_mes, W
+	movwf	var1
+	movf	var_dia, W
+	movwf	var2
+	btfsc	guardar, 0
+	goto	guardar_hora
+    return
+
+    guardar_hora:
+	clrf	guardar
+	movf	var_min,w
+	movwf	minutos
+	movf	var_hora,w
+	movwf	horas
+	clrf	segundos
+    return
+
+   displays_listos:
+	movf	var1,w
+	div	10,decenas,unidades
+	movf	unidades,w
+	call	tabla
+	movwf	display_4
+	movf	decenas,w
+	call	tabla
+	movwf	display_3
+	
+	movf	var2,w
+	div	10,decenas,unidades
+	movf	unidades,w
+	call	tabla
+	movwf	display_2
+	movf	decenas,w
+	call	tabla
+	movwf	display_1
+    return
+    
+    inc_cont:
+	incf	contador
+	movf	contador, W
+	sublw	11111111B
+	btfsc	STATUS, 2
+	goto	inc_cont1
+    return
+
+    inc_cont1:
+	clrf	contador
+	incf	contador+1 
+	movlw	2
+	subwf	contador+1, W
+	btfsc	STATUS,2
+	goto	set_guardar
+    return
+
+    set_guardar:
+	clrf	contador+1
+	bsf	guardar, 0
+    return
+
+ END    
